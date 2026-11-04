@@ -1,0 +1,250 @@
+"""Cửa sổ chính: lắp ráp các panel và nối tín hiệu."""
+from __future__ import annotations
+
+import os
+
+from PySide6.QtCore import QSettings, Qt
+from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtWidgets import (QFileDialog, QMainWindow, QMessageBox, QSplitter, QVBoxLayout, QWidget)
+
+from project.model import Project
+from services import ffmpeg_locator
+from services.ffprobe import VideoInfo, probe
+from services.tasks import TaskRunner
+from subtitle.srt import parse_srt, read_srt_file, validate_cues
+from utils import paths
+from .preview_panel import PreviewPanel
+from .segment_panel import SegmentPanel
+from .sidebar import Sidebar
+from .subtitle_panel import SubtitlePanel
+from .timeline_panel import TimelinePanel
+from .topbar import TopBar
+
+VIDEO_FILTER = "Video (*.mp4 *.mkv *.mov *.avi *.flv *.ts *.webm *.m4v);;Tất cả file (*.*)"
+PROJECT_EXT = "Dự án LiveCut (*.livecut)"
+
+
+class MainWindow(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setMinimumSize(1100, 680)
+        self.resize(1480, 900)
+        self.project = Project()
+        self.project_path = ""
+        self.video: VideoInfo | None = None
+        self.runner = TaskRunner(self)
+        self.settings = QSettings("LiveCutStudio", "LiveCutStudio")
+        self._build_ui()
+        self._wire()
+        self._restore_layout()
+        self.sidebar.set_project(self.project)
+        self.sidebar.set_temp_usage(paths.temp_usage_bytes())
+        self.runner.run(ffmpeg_locator.detect, self.sidebar.set_ffmpeg_status)
+        self._refresh_title()
+
+    # --- dựng giao diện ---
+    def _build_ui(self) -> None:
+        root = QWidget()
+        root.setObjectName("Root")
+        v = QVBoxLayout(root)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        self.topbar = TopBar()
+        v.addWidget(self.topbar)
+
+        self.sidebar = Sidebar()
+        self.preview = PreviewPanel()
+        self.subtitles = SubtitlePanel()
+        self.timeline = TimelinePanel()
+        self.segments = SegmentPanel()
+
+        self.top_split = QSplitter(Qt.Horizontal)
+        for w in (self.sidebar, self.preview, self.subtitles):
+            self.top_split.addWidget(w)
+        self.bottom_split = QSplitter(Qt.Horizontal)
+        self.bottom_split.addWidget(self.timeline)
+        self.bottom_split.addWidget(self.segments)
+        self.main_split = QSplitter(Qt.Vertical)
+        self.main_split.addWidget(self.top_split)
+        self.main_split.addWidget(self.bottom_split)
+        for s in (self.top_split, self.bottom_split, self.main_split):
+            s.setHandleWidth(8)
+            s.setChildrenCollapsible(False)
+        self.top_split.setStretchFactor(1, 1)
+        self.bottom_split.setStretchFactor(0, 1)
+        self.main_split.setStretchFactor(0, 1)
+        self.top_split.setSizes([300, 760, 400])
+        self.bottom_split.setSizes([1000, 420])
+        self.main_split.setSizes([600, 290])
+
+        body = QWidget()
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(10, 10, 10, 10)
+        bl.addWidget(self.main_split)
+        v.addWidget(body, 1)
+        self.setCentralWidget(root)
+        self.statusBar().setSizeGripEnabled(False)
+        self.statusBar().showMessage("Sẵn sàng")
+
+    def _wire(self) -> None:
+        t = self.topbar
+        t.import_video.clicked.connect(self.import_video)
+        t.import_srt.clicked.connect(self.import_srt)
+        t.open_project.clicked.connect(self.open_project)
+        t.save_project.clicked.connect(self.save_project)
+        t.settings.clicked.connect(lambda: self._show_tools())
+        t.btn_sidebar.toggled.connect(self.sidebar.setVisible)
+        t.btn_right.toggled.connect(self.subtitles.setVisible)
+        t.btn_bottom.toggled.connect(self.bottom_split.setVisible)
+        self.preview.importRequested.connect(self.import_video)
+        self.subtitles.importRequested.connect(self.import_srt)
+        self.sidebar.importVideoRequested.connect(self.import_video)
+        self.sidebar.importSrtRequested.connect(self.import_srt)
+        self.sidebar.projectRenamed.connect(self._rename_project)
+        self.sidebar.clearTempRequested.connect(self._clear_temp)
+        self.sidebar.groupsChanged.connect(self.sidebar.refresh_project)
+        self.subtitles.cueActivated.connect(self.timeline.jump_to)
+        for seq, fn in (("Ctrl+O", self.import_video), ("Ctrl+Shift+O", self.import_srt),
+                        ("Ctrl+P", self.open_project), ("Ctrl+S", self.save_project),
+                        ("Ctrl+B", t.btn_sidebar.click), ("Ctrl+R", t.btn_right.click),
+                        ("Ctrl+T", t.btn_bottom.click)):
+            QShortcut(QKeySequence(seq), self, activated=fn)
+
+    def _show_tools(self) -> None:
+        if not self.topbar.btn_sidebar.isChecked():
+            self.topbar.btn_sidebar.click()
+        self.sidebar.show_page(3)
+
+    # --- trạng thái ---
+    def _last_dir(self) -> str:
+        return self.settings.value("last_dir", "", str)
+
+    def _remember_dir(self, path: str) -> None:
+        self.settings.setValue("last_dir", os.path.dirname(path))
+
+    def _refresh_title(self) -> None:
+        self.setWindowTitle(f"{self.project.name} – LiveCut Studio")
+        self.topbar.set_project_name(self.project.name)
+
+    def _rename_project(self, name: str) -> None:
+        if name:
+            self.project.name = name
+            self._refresh_title()
+
+    def _clear_temp(self) -> None:
+        freed = paths.clear_temp()
+        self.sidebar.set_temp_usage(paths.temp_usage_bytes())
+        self.statusBar().showMessage(f"Đã giải phóng {paths.human_size(freed)}", 4000)
+
+    def _error(self, title: str, message: str) -> None:
+        self.statusBar().showMessage(title, 5000)
+        QMessageBox.warning(self, title, message)
+
+    # --- import video ---
+    def import_video(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Nhập video", self._last_dir(), VIDEO_FILTER)
+        if path:
+            self._load_video(path)
+
+    def _load_video(self, path: str) -> None:
+        self._remember_dir(path)
+        self.statusBar().showMessage("Đang đọc thông tin video…")
+        self.runner.run(lambda: probe(path), self._on_video_ready, lambda m: self._error("Không đọc được video", m))
+
+    def _on_video_ready(self, info: VideoInfo) -> None:
+        self.video = info
+        self.project.video_path = info.path
+        self.sidebar.set_video(info)
+        self.sidebar.refresh_project()
+        self.timeline.set_duration(info.duration_ms)
+        self.preview.show_video_loaded(os.path.basename(info.path), info.duration_ms)
+        self.statusBar().showMessage("Đã nhập video", 4000)
+        self._check_srt()
+
+    # --- import SRT ---
+    def import_srt(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Nhập phụ đề SRT", self._last_dir(), "Phụ đề (*.srt);;Tất cả file (*.*)")
+        if not path:
+            return
+        self._remember_dir(path)
+        try:
+            result = parse_srt(read_srt_file(path))
+        except OSError as exc:
+            self._error("Không đọc được SRT", str(exc))
+            return
+        if not result.cues:
+            self._error("File SRT trống", "Không đọc được phụ đề nào. Hãy kiểm tra định dạng file.")
+            return
+        self.project.srt_path = path
+        self.project.cues = result.cues
+        self.subtitles.set_cues(result.cues)
+        self.sidebar.refresh_project()
+        self.statusBar().showMessage(f"Đã nhập {len(result.cues)} phụ đề", 4000)
+        notes = [f"• {w}" for w in result.warnings[:5]]
+        if len(result.warnings) > 5:
+            notes.append(f"… và {len(result.warnings) - 5} cảnh báo khác.")
+        self._check_srt(extra=notes)
+
+    def _check_srt(self, extra: list[str] | None = None) -> None:
+        if not self.project.cues:
+            return
+        issues = validate_cues(self.project.cues, self.video.duration_ms if self.video else None)
+        lines = [f"• {i.message}" for i in issues] + (extra or [])
+        if lines:
+            QMessageBox.warning(self, "Kiểm tra file SRT", "\n".join(lines))
+
+    # --- lưu / mở dự án ---
+    def save_project(self) -> None:
+        path = self.project_path
+        if not path:
+            suggested = os.path.join(self._last_dir(), self.project.name + ".livecut")
+            path, _ = QFileDialog.getSaveFileName(self, "Lưu dự án", suggested, PROJECT_EXT)
+            if not path:
+                return
+            if not path.endswith(".livecut"):
+                path += ".livecut"
+        try:
+            self.project.save(path)
+        except OSError as exc:
+            self._error("Không lưu được dự án", str(exc))
+            return
+        self.project_path = path
+        self.statusBar().showMessage(f"Đã lưu {os.path.basename(path)}", 4000)
+
+    def open_project(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Mở dự án", self._last_dir(), PROJECT_EXT)
+        if not path:
+            return
+        try:
+            project = Project.load(path)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            self._error("Không mở được dự án", str(exc))
+            return
+        self._remember_dir(path)
+        self.project, self.project_path, self.video = project, path, None
+        self.sidebar.set_project(project)
+        self.sidebar.set_video(None)
+        self.subtitles.set_cues(project.cues)
+        self.timeline.set_duration(0)
+        self._refresh_title()
+        if project.video_path and os.path.isfile(project.video_path):
+            self._load_video(project.video_path)
+        elif project.video_path:
+            self._error("Không tìm thấy video nguồn", f"File không còn ở:\n{project.video_path}\nHãy nhập lại video.")
+
+    # --- bố cục ---
+    def _restore_layout(self) -> None:
+        geo = self.settings.value("geometry")
+        if geo:
+            self.restoreGeometry(geo)
+        for key, split in (("top", self.top_split), ("bottom", self.bottom_split), ("main", self.main_split)):
+            state = self.settings.value("split_" + key)
+            if state:
+                split.restoreState(state)
+
+    def closeEvent(self, e) -> None:
+        self.settings.setValue("geometry", self.saveGeometry())
+        for key, split in (("top", self.top_split), ("bottom", self.bottom_split), ("main", self.main_split)):
+            self.settings.setValue("split_" + key, split.saveState())
+        self.runner.wait_all()
+        super().closeEvent(e)
