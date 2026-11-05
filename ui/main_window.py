@@ -7,6 +7,7 @@ from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QFileDialog, QMainWindow, QMessageBox, QSplitter, QVBoxLayout, QWidget)
 
+from player.video_player import VideoPlayer
 from project.model import Project
 from services import ffmpeg_locator
 from services.ffprobe import VideoInfo, probe
@@ -33,6 +34,7 @@ class MainWindow(QMainWindow):
         self.project_path = ""
         self.video: VideoInfo | None = None
         self.runner = TaskRunner(self)
+        self.player = VideoPlayer(self)
         self.settings = QSettings("LiveCutStudio", "LiveCutStudio")
         self._build_ui()
         self._wire()
@@ -57,6 +59,7 @@ class MainWindow(QMainWindow):
         self.subtitles = SubtitlePanel()
         self.timeline = TimelinePanel()
         self.segments = SegmentPanel()
+        self.preview.attach_video_widget(self.player.video_widget)
 
         self.top_split = QSplitter(Qt.Horizontal)
         for w in (self.sidebar, self.preview, self.subtitles):
@@ -104,11 +107,37 @@ class MainWindow(QMainWindow):
         self.sidebar.clearTempRequested.connect(self._clear_temp)
         self.sidebar.groupsChanged.connect(self.sidebar.refresh_project)
         self.subtitles.cueActivated.connect(self.timeline.jump_to)
+        # trình phát
+        p, pv = self.player, self.preview
+        self.subtitles.cueActivated.connect(p.seek)          # nhấp phụ đề -> nhảy ngay
+        self.timeline.seekRequested.connect(p.seek_drag)     # kéo/nhấp timeline -> seek (gộp yêu cầu)
+        pv.playToggled.connect(p.toggle)
+        pv.seekRelative.connect(p.seek_relative)
+        pv.speedChanged.connect(p.set_rate)
+        pv.volumeChanged.connect(p.set_volume)
+        pv.muteToggled.connect(p.set_muted)
+        p.playingChanged.connect(pv.set_playing)
+        p.positionChanged.connect(self._on_player_position)
+        p.durationChanged.connect(pv.set_duration)
+        p.loaded.connect(pv.show_player)
+        p.failed.connect(self._on_player_failed)
+        p.seekLatency.connect(lambda ms: self.statusBar().showMessage(f"Seek: {ms:.0f} ms", 3000))
         for seq, fn in (("Ctrl+O", self.import_video), ("Ctrl+Shift+O", self.import_srt),
                         ("Ctrl+P", self.open_project), ("Ctrl+S", self.save_project),
-                        ("Ctrl+B", t.btn_sidebar.click), ("Ctrl+R", t.btn_right.click),
+                        ("Space", p.toggle), ("Ctrl+B", t.btn_sidebar.click), ("Ctrl+R", t.btn_right.click),
                         ("Ctrl+T", t.btn_bottom.click)):
             QShortcut(QKeySequence(seq), self, activated=fn)
+
+    def _on_player_position(self, ms: int) -> None:
+        self.preview.set_position(ms)
+        if not self.timeline.view.is_dragging:      # đang kéo thì để timeline tự vẽ, tránh giật
+            self.timeline.jump_to(ms, follow=self.player.is_playing())
+
+    def _on_player_failed(self, message: str) -> None:
+        self.preview.show_error(message)
+        QMessageBox.warning(
+            self, "Không phát được video",
+            message + "\n\nThử chuyển video sang MP4 (H.264 + AAC) rồi nhập lại.")
 
     def _show_tools(self) -> None:
         if not self.topbar.btn_sidebar.isChecked():
@@ -158,6 +187,7 @@ class MainWindow(QMainWindow):
         self.sidebar.refresh_project()
         self.timeline.set_duration(info.duration_ms)
         self.preview.show_video_loaded(os.path.basename(info.path), info.duration_ms)
+        self.player.load(info.path)
         self.statusBar().showMessage("Đã nhập video", 4000)
         self._check_srt()
 
@@ -226,6 +256,8 @@ class MainWindow(QMainWindow):
         self.sidebar.set_video(None)
         self.subtitles.set_cues(project.cues)
         self.timeline.set_duration(0)
+        self.player.unload()
+        self.preview.reset()
         self._refresh_title()
         if project.video_path and os.path.isfile(project.video_path):
             self._load_video(project.video_path)
@@ -246,5 +278,6 @@ class MainWindow(QMainWindow):
         self.settings.setValue("geometry", self.saveGeometry())
         for key, split in (("top", self.top_split), ("bottom", self.bottom_split), ("main", self.main_split)):
             self.settings.setValue("split_" + key, split.saveState())
+        self.player.unload()
         self.runner.wait_all()
         super().closeEvent(e)

@@ -27,6 +27,10 @@ class TimelineView(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
 
+    @property
+    def is_dragging(self) -> bool:
+        return self._dragging
+
     # --- API ---
     def set_duration(self, ms: int) -> None:
         self.scale.set_duration(ms)

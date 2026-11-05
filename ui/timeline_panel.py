@@ -41,8 +41,8 @@ class TimelinePanel(Panel):
         self.view.set_duration(ms)
         self._update_clock(0)
 
-    def jump_to(self, ms: int) -> None:
-        self.view.set_playhead(ms, follow=True)
+    def jump_to(self, ms: int, follow: bool = True) -> None:
+        self.view.set_playhead(ms, follow=follow)
         self._update_clock(ms)
 
     def _on_seek(self, ms: int) -> None:
