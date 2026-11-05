@@ -29,10 +29,10 @@ QMainWindow, QDialog, QMessageBox { background: @bg@; }
 QSplitter::handle { background: transparent; }
 QSplitter::handle:horizontal { width: 8px; }
 QSplitter::handle:vertical { height: 8px; }
-QLineEdit, QPlainTextEdit, QComboBox {
+QLineEdit, QPlainTextEdit, QComboBox, QDoubleSpinBox {
   background: @raised@; border: 1px solid @border@; border-radius: 8px; padding: 6px 10px;
   selection-background-color: @accent_dim@; }
-QLineEdit:focus, QPlainTextEdit:focus { border-color: @accent@; }
+QLineEdit:focus, QPlainTextEdit:focus, QDoubleSpinBox:focus { border-color: @accent@; }
 QLineEdit:disabled, QComboBox:disabled { color: @faint@; }
 QComboBox::drop-down { border: none; width: 0px; }
 QComboBox QAbstractItemView { background: @raised@; border: 1px solid @border_strong@; outline: 0; }

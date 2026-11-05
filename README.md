@@ -23,5 +23,6 @@ Phần mềm Windows cắt và ghép video livestream bán hàng, viết bằng 
 - Giai đoạn 1 (kiến trúc + giao diện): có. Bố cục 5 khu vực kéo đổi kích thước, ẩn/hiện bằng Ctrl+B / Ctrl+R / Ctrl+T, nhớ bố cục giữa các lần mở.
 - Phần của giai đoạn 2 đã làm sẵn: nhập video (đọc bằng ffprobe), nhập SRT (tự nhận mã hóa UTF-8/UTF-16/cp1258), cảnh báo SRT lệch thời lượng, tìm kiếm phụ đề không dấu, lưu/mở dự án, tạo/đổi tên/xóa nhóm.
 - Giai đoạn 3 (mã nguồn đã viết, cần chạy thử trên máy Windows): trình phát duy nhất `player/video_player.py` có hình + tiếng, Space phát/dừng, tua ±5 giây, tốc độ 0.5x–2x, âm lượng, tắt tiếng; nhấp phụ đề hoặc kéo timeline để seek, thanh trạng thái hiện thời gian seek.
-- Chưa làm: tối ưu seek sâu hơn (GĐ4), chọn đoạn (GĐ5-6), quản lý đoạn trong nhóm (GĐ7), xuất (GĐ8), chuyển cảnh (GĐ9). Các nút thuộc giai đoạn này đang tắt và có chú thích giai đoạn sẽ bật.
+- Giai đoạn 5 (cần chạy thử trên Windows): chọn dòng phụ đề (Ctrl/Shift) -> "Thêm vào video" (Enter) -> các đoạn hiện ở panel "Đoạn video" và trên timeline, có đệm trước/sau chỉnh được; nút "Xem thử" phát lần lượt các đoạn như một video. Logic nằm ở `editor/ranges.py` (có test).
+- Chưa làm: xuất MP4 từ các đoạn đã chọn (GĐ8), tối ưu seek sâu hơn (GĐ4), chọn đoạn (GĐ5-6), quản lý đoạn trong nhóm (GĐ7), xuất (GĐ8), chuyển cảnh (GĐ9). Các nút thuộc giai đoạn này đang tắt và có chú thích giai đoạn sẽ bật.
 - Chưa có: sửa/gộp/chia phụ đề và xuất SRT đã sửa (GĐ2 còn lại).

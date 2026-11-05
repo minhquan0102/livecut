@@ -7,6 +7,8 @@ from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QFileDialog, QMainWindow, QMessageBox, QSplitter, QVBoxLayout, QWidget)
 
+from editor.ranges import build_ranges
+from player.sequence import SequencePreview
 from player.video_player import VideoPlayer
 from project.model import Project
 from services import ffmpeg_locator
@@ -18,6 +20,7 @@ from .preview_panel import PreviewPanel
 from .segment_panel import SegmentPanel
 from .sidebar import Sidebar
 from .subtitle_panel import SubtitlePanel
+from .theme import P
 from .timeline_panel import TimelinePanel
 from .topbar import TopBar
 
@@ -35,6 +38,8 @@ class MainWindow(QMainWindow):
         self.video: VideoInfo | None = None
         self.runner = TaskRunner(self)
         self.player = VideoPlayer(self)
+        self.sequence = SequencePreview(self.player, self)
+        self.ranges: list = []
         self.settings = QSettings("LiveCutStudio", "LiveCutStudio")
         self._build_ui()
         self._wire()
@@ -121,6 +126,16 @@ class MainWindow(QMainWindow):
         p.durationChanged.connect(pv.set_duration)
         p.loaded.connect(pv.show_player)
         p.failed.connect(self._on_player_failed)
+        # chọn câu -> đoạn -> xem thử liên tiếp
+        self.subtitles.chosenChanged.connect(self._refresh_chosen)
+        self.segments.paddingChanged.connect(self._refresh_chosen)
+        self.segments.clearRequested.connect(self._clear_chosen)
+        self.segments.previewRequested.connect(self._toggle_sequence)
+        self.segments.rangeActivated.connect(self._on_range_clicked)
+        self.sequence.activeChanged.connect(self.segments.set_previewing)
+        self.sequence.rangeChanged.connect(self.segments.highlight)
+        self.sequence.finished.connect(lambda: self.statusBar().showMessage("Đã xem hết phần đã chọn", 4000))
+        p.loaded.connect(self._refresh_chosen)
         p.seekLatency.connect(lambda ms: self.statusBar().showMessage(f"Seek: {ms:.0f} ms", 3000))
         for seq, fn in (("Ctrl+O", self.import_video), ("Ctrl+Shift+O", self.import_srt),
                         ("Ctrl+P", self.open_project), ("Ctrl+S", self.save_project),
@@ -132,6 +147,34 @@ class MainWindow(QMainWindow):
         self.preview.set_position(ms)
         if not self.timeline.view.is_dragging:      # đang kéo thì để timeline tự vẽ, tránh giật
             self.timeline.jump_to(ms, follow=self.player.is_playing())
+
+    # --- các đoạn được chọn từ phụ đề ---
+    def _refresh_chosen(self) -> None:
+        self.sequence.stop()
+        chosen = [c for c in self.project.cues if c.mark == "selected"]
+        before, after = self.segments.padding_ms()
+        dur = self.video.duration_ms if self.video else 0
+        self.ranges = build_ranges(chosen, before, after, dur)
+        self.segments.set_ranges(self.ranges, {c.index: c for c in self.project.cues})
+        self.timeline.view.set_segments([(r.start_ms, r.end_ms, P["ok"]) for r in self.ranges])
+        self.segments.set_preview_enabled(bool(self.ranges) and self.player.is_ready())
+
+    def _clear_chosen(self) -> None:
+        for c in self.project.cues:
+            if c.mark == "selected":
+                c.mark = ""
+        self.subtitles.refresh_marks()
+        self._refresh_chosen()
+
+    def _toggle_sequence(self) -> None:
+        if self.sequence.active:
+            self.sequence.stop()
+        elif self.ranges:
+            self.sequence.start([(r.start_ms, r.end_ms) for r in self.ranges])
+
+    def _on_range_clicked(self, ms: int) -> None:
+        self.player.seek(ms)
+        self.timeline.jump_to(ms)
 
     def _on_player_failed(self, message: str) -> None:
         self.preview.show_error(message)
@@ -186,6 +229,7 @@ class MainWindow(QMainWindow):
         self.sidebar.set_video(info)
         self.sidebar.refresh_project()
         self.timeline.set_duration(info.duration_ms)
+        self._refresh_chosen()
         self.preview.show_video_loaded(os.path.basename(info.path), info.duration_ms)
         self.player.load(info.path)
         self.statusBar().showMessage("Đã nhập video", 4000)
@@ -208,6 +252,7 @@ class MainWindow(QMainWindow):
         self.project.srt_path = path
         self.project.cues = result.cues
         self.subtitles.set_cues(result.cues)
+        self._refresh_chosen()
         self.sidebar.refresh_project()
         self.statusBar().showMessage(f"Đã nhập {len(result.cues)} phụ đề", 4000)
         notes = [f"• {w}" for w in result.warnings[:5]]
@@ -258,6 +303,7 @@ class MainWindow(QMainWindow):
         self.timeline.set_duration(0)
         self.player.unload()
         self.preview.reset()
+        self._refresh_chosen()
         self._refresh_title()
         if project.video_path and os.path.isfile(project.video_path):
             self._load_video(project.video_path)

@@ -3,15 +3,15 @@ from __future__ import annotations
 
 from PySide6.QtCore import (QAbstractListModel, QModelIndex, QRectF, QSize, QSortFilterProxyModel, Qt,
                             QTimer, Signal)
-from PySide6.QtGui import QColor, QPainter
-from PySide6.QtWidgets import (QAbstractItemView, QLabel, QLineEdit, QListView, QPlainTextEdit, QStackedWidget,
+from PySide6.QtGui import QColor, QKeySequence, QPainter, QShortcut
+from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QLabel, QLineEdit, QListView, QPlainTextEdit, QStackedWidget,
                                QStyle, QStyledItemDelegate)
 
 from subtitle.srt import Cue
 from utils.text import fold
 from utils.timecode import format_clock
 from .theme import P
-from .widgets import EmptyState, Panel
+from .widgets import EmptyState, IconButton, Panel
 
 MARK_COLORS = {"selected": P["ok"], "review": P["warn"], "removed": P["danger"]}
 CUE_ROLE = int(Qt.UserRole) + 1
@@ -125,6 +125,7 @@ class SubtitlePanel(Panel):
     cueActivated = Signal(int)          # start_ms của dòng đang chọn
     selectionChangedCues = Signal(list)  # các Cue đang chọn, theo thời gian
     importRequested = Signal()
+    chosenChanged = Signal()             # tập dòng "đã chọn vào video" vừa thay đổi
 
     def __init__(self, parent=None) -> None:
         super().__init__("Phụ đề", parent)
@@ -167,6 +168,23 @@ class SubtitlePanel(Panel):
         self.body.addWidget(self.detail_title)
         self.body.addWidget(self.detail)
 
+        self.btn_add = IconButton("plus", "Đưa các dòng đang chọn vào video (phím Enter)",
+                                  label="Thêm vào video", variant="primary")
+        self.btn_remove = IconButton("trash", "Bỏ các dòng đang chọn khỏi video (phím Delete)",
+                                     label="Bỏ khỏi video")
+        acts = QHBoxLayout()
+        acts.setSpacing(6)
+        acts.addWidget(self.btn_add, 1)
+        acts.addWidget(self.btn_remove, 1)
+        self.body.addLayout(acts)
+        self.btn_add.clicked.connect(lambda: self.set_mark_on_selection("selected"))
+        self.btn_remove.clicked.connect(lambda: self.set_mark_on_selection(""))
+        for keys, mark in (((Qt.Key_Return, Qt.Key_Enter), "selected"), ((Qt.Key_Delete,), "")):
+            for k in keys:
+                sc = QShortcut(QKeySequence(k), self.view)
+                sc.setContext(Qt.WidgetShortcut)
+                sc.activated.connect(lambda m=mark: self.set_mark_on_selection(m))
+
         self.search.textChanged.connect(self._on_search)
         self.view.selectionModel().selectionChanged.connect(self._on_selection)
         self.view.selectionModel().currentChanged.connect(self._on_current)
@@ -189,6 +207,18 @@ class SubtitlePanel(Panel):
     def _on_search(self, text: str) -> None:
         self.proxy.set_needle(text)
         self._update_count()
+
+    def set_mark_on_selection(self, mark: str) -> None:
+        cues = self.selected_cues()
+        if not cues:
+            return
+        for c in cues:
+            c.mark = mark
+        self.view.viewport().update()
+        self.chosenChanged.emit()
+
+    def refresh_marks(self) -> None:
+        self.view.viewport().update()
 
     def selected_cues(self) -> list[Cue]:
         rows = self.view.selectionModel().selectedRows()

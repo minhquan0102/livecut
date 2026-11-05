@@ -39,6 +39,11 @@ class IconButton(QToolButton):
         self._name = name
         self.update()
 
+    def set_label(self, text: str) -> None:
+        self._label = text
+        self.updateGeometry()
+        self.update()
+
     def sizeHint(self) -> QSize:
         if not self._label:
             return QSize(self._h, self._h)

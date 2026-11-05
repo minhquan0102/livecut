@@ -55,6 +55,9 @@ class VideoPlayer(QObject):
     def has_media(self) -> bool:
         return not self._player.source().isEmpty()
 
+    def is_ready(self) -> bool:
+        return self._ready
+
     def is_playing(self) -> bool:
         return self._player.playbackState() == QMediaPlayer.PlayingState
 
