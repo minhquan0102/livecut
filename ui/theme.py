@@ -60,6 +60,7 @@ QStatusBar { background: @panel@; color: @muted@; border-top: 1px solid @border@
 QStatusBar::item { border: none; }
 QPushButton { background: @raised@; border: 1px solid @border_strong@; border-radius: 8px; padding: 6px 14px; }
 QPushButton:hover { background: @hover@; }
+QDialog QLabel { background: transparent; }
 """
 
 

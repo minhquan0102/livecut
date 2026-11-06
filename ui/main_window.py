@@ -16,6 +16,7 @@ from services.ffprobe import VideoInfo, probe
 from services.tasks import TaskRunner
 from subtitle.srt import parse_srt, read_srt_file, validate_cues
 from utils import paths
+from .export_dialog import ExportDialog
 from .preview_panel import PreviewPanel
 from .segment_panel import SegmentPanel
 from .sidebar import Sidebar
@@ -101,6 +102,7 @@ class MainWindow(QMainWindow):
         t.open_project.clicked.connect(self.open_project)
         t.save_project.clicked.connect(self.save_project)
         t.settings.clicked.connect(lambda: self._show_tools())
+        t.export.clicked.connect(self.export_video)
         t.btn_sidebar.toggled.connect(self.sidebar.setVisible)
         t.btn_right.toggled.connect(self.subtitles.setVisible)
         t.btn_bottom.toggled.connect(self.bottom_split.setVisible)
@@ -139,7 +141,7 @@ class MainWindow(QMainWindow):
         p.seekLatency.connect(lambda ms: self.statusBar().showMessage(f"Seek: {ms:.0f} ms", 3000))
         for seq, fn in (("Ctrl+O", self.import_video), ("Ctrl+Shift+O", self.import_srt),
                         ("Ctrl+P", self.open_project), ("Ctrl+S", self.save_project),
-                        ("Space", p.toggle), ("Ctrl+B", t.btn_sidebar.click), ("Ctrl+R", t.btn_right.click),
+                        ("Space", p.toggle), ("Ctrl+E", self.export_video), ("Ctrl+B", t.btn_sidebar.click), ("Ctrl+R", t.btn_right.click),
                         ("Ctrl+T", t.btn_bottom.click)):
             QShortcut(QKeySequence(seq), self, activated=fn)
 
@@ -158,6 +160,24 @@ class MainWindow(QMainWindow):
         self.segments.set_ranges(self.ranges, {c.index: c for c in self.project.cues})
         self.timeline.view.set_segments([(r.start_ms, r.end_ms, P["ok"]) for r in self.ranges])
         self.segments.set_preview_enabled(bool(self.ranges) and self.player.is_ready())
+        can_export = bool(self.ranges) and self.video is not None
+        self.topbar.export.setEnabled(can_export)
+        self.topbar.export.setToolTip(
+            "Xuất các đoạn đã chọn thành một file MP4 (Ctrl+E)" if can_export
+            else "Chọn câu phụ đề và bấm “Thêm vào video” trước khi xuất")
+
+    def export_video(self) -> None:
+        if not self.ranges or self.video is None:
+            return
+        self.sequence.stop()
+        try:
+            ffmpeg = ffmpeg_locator.require_binary("ffmpeg")
+        except ffmpeg_locator.FFmpegNotFoundError as exc:
+            self._error("Thiếu FFmpeg", str(exc))
+            return
+        stem = os.path.splitext(os.path.basename(self.video.path))[0]
+        default = os.path.join(os.path.dirname(self.video.path), f"{stem}_cut.mp4")
+        ExportDialog(self, ffmpeg, self.video, [(r.start_ms, r.end_ms) for r in self.ranges], default).exec()
 
     def _clear_chosen(self) -> None:
         for c in self.project.cues:
