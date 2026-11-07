@@ -6,19 +6,24 @@ import time
 
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
                                QLineEdit, QMessageBox, QProgressBar, QPushButton, QVBoxLayout)
 
-from export.exporter import ExportOptions
+from editor.ranges import cut_cues
+from export.exporter import ExportOptions, resolution_choices
 from export.worker import ExportWorker
 from services import ffmpeg_locator
 from services.ffprobe import VideoInfo
+from subtitle.srt import Cue, serialize_srt
 from utils import paths
 from utils.timecode import format_clock
 from .theme import P
 
-QUALITY = [("Cao (file lớn)", 18), ("Cân bằng (khuyên dùng)", 21), ("Nhỏ gọn", 25)]
-HEIGHTS = (1080, 720, 480)
+# (nhãn, CRF, preset): CRF càng nhỏ càng nét; preset chậm hơn nén hiệu quả hơn
+QUALITY = [("Rất cao — gần như bản gốc (xuất chậm hơn)", 16, "fast"),
+           ("Cao (khuyên dùng)", 18, "veryfast"),
+           ("Cân bằng", 21, "veryfast"),
+           ("Nhỏ gọn", 25, "veryfast")]
 
 _PRIMARY = (f"QPushButton {{ background: {P['accent']}; color: {P['on_accent']}; border: none; "
             f"font-weight: 600; padding: 7px 18px; }}"
@@ -31,11 +36,12 @@ _PROGRESS = (f"QProgressBar {{ background: {P['raised']}; border: none; border-r
 
 class ExportDialog(QDialog):
     def __init__(self, parent, ffmpeg: str, info: VideoInfo, ranges: list[tuple[int, int]],
-                 default_path: str) -> None:
+                 default_path: str, cues: list[Cue] | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Xuất video")
         self.setMinimumWidth(580)
         self._ffmpeg, self._info, self._ranges = ffmpeg, info, ranges
+        self._cues = cues or []
         self._worker: ExportWorker | None = None
         self._out = ""
 
@@ -61,18 +67,21 @@ class ExportDialog(QDialog):
         prow.addWidget(self.path, 1)
         prow.addWidget(self.btn_browse)
         self.res = QComboBox()
-        self.res.addItem(f"Giữ nguyên ({info.width}×{info.height})", 0)
-        for h in HEIGHTS:
-            if h < info.height:
-                self.res.addItem(f"{h}p", h)
+        self._res = resolution_choices(info.width, info.height)
+        for label, _w, _h in self._res:
+            self.res.addItem(label)
         self.quality = QComboBox()
-        for label, crf in QUALITY:
-            self.quality.addItem(label, crf)
+        for label, _crf, _preset in QUALITY:
+            self.quality.addItem(label)
         self.quality.setCurrentIndex(1)
         form.addRow("Lưu tại", prow)
         form.addRow("Độ phân giải", self.res)
         form.addRow("Chất lượng", self.quality)
         lay.addLayout(form)
+        self.chk_srt = QCheckBox("Xuất kèm file phụ đề .srt khớp với video mới")
+        self.chk_srt.setChecked(True)
+        self.chk_srt.setVisible(bool(self._cues))
+        lay.addWidget(self.chk_srt)
 
         self.bar = QProgressBar()
         self.bar.setRange(0, 1000)
@@ -131,7 +140,9 @@ class ExportDialog(QDialog):
         except OSError as exc:
             self._say(f"Không tạo được thư mục: {exc}", True)
             return
-        opts = ExportOptions(height=int(self.res.currentData()), crf=int(self.quality.currentData()))
+        _label, w, h = self._res[self.res.currentIndex()]
+        _q, crf, preset = QUALITY[self.quality.currentIndex()]
+        opts = ExportOptions(width=w, height=h, crf=crf, preset=preset)
         work = str(paths.temp_dir() / f"export_{int(time.time())}")
         self._worker = ExportWorker(self._ffmpeg, self._info.path, self._ranges, out, opts,
                                     self._info.has_audio, self._info.fps, work, self)
@@ -147,7 +158,7 @@ class ExportDialog(QDialog):
         self._worker.start()
 
     def _set_running(self, on: bool) -> None:
-        for w in (self.path, self.btn_browse, self.res, self.quality, self.btn_start):
+        for w in (self.path, self.btn_browse, self.res, self.quality, self.chk_srt, self.btn_start):
             w.setEnabled(not on)
         self.btn_close.setText("Hủy xuất" if on else "Đóng")
         self.btn_close.setEnabled(True)
@@ -160,9 +171,22 @@ class ExportDialog(QDialog):
         self.bar.setValue(1000)
         self._set_running(False)
         size = os.path.getsize(path) if os.path.exists(path) else 0
-        self._say(f"Xong! Đã lưu: {path}  ({paths.human_size(size)})")
+        note = self._write_srt(path)
+        self._say(f"Xong! Đã lưu: {path}  ({paths.human_size(size)})" + note)
         self.btn_open.show()
         self.btn_start.setText("Xuất lại")
+
+    def _write_srt(self, video_path: str) -> str:
+        if not (self._cues and self.chk_srt.isChecked()):
+            return ""
+        chosen = {c.index for c in self._cues if c.mark == "selected"}
+        srt_path = os.path.splitext(video_path)[0] + ".srt"
+        try:
+            with open(srt_path, "w", encoding="utf-8") as f:
+                f.write(serialize_srt(cut_cues(self._ranges, self._cues, chosen)))
+        except OSError as exc:
+            return f"\nKhông ghi được file phụ đề: {exc}"
+        return f"\nPhụ đề: {srt_path}"
 
     def _on_failed(self, message: str) -> None:
         self._set_running(False)

@@ -7,7 +7,7 @@ from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QFileDialog, QMainWindow, QMessageBox, QSplitter, QVBoxLayout, QWidget)
 
-from editor.ranges import build_ranges
+from editor.ranges import apply_order, build_ranges, range_key
 from player.sequence import SequencePreview
 from player.video_player import VideoPlayer
 from project.model import Project
@@ -134,6 +134,8 @@ class MainWindow(QMainWindow):
         self.segments.clearRequested.connect(self._clear_chosen)
         self.segments.previewRequested.connect(self._toggle_sequence)
         self.segments.rangeActivated.connect(self._on_range_clicked)
+        self.segments.orderChanged.connect(self._on_order_changed)
+        self.segments.sortRequested.connect(self._reset_order)
         self.sequence.activeChanged.connect(self.segments.set_previewing)
         self.sequence.rangeChanged.connect(self.segments.highlight)
         self.sequence.finished.connect(lambda: self.statusBar().showMessage("Đã xem hết phần đã chọn", 4000))
@@ -156,7 +158,9 @@ class MainWindow(QMainWindow):
         chosen = [c for c in self.project.cues if c.mark == "selected"]
         before, after = self.segments.padding_ms()
         dur = self.video.duration_ms if self.video else 0
-        self.ranges = build_ranges(chosen, before, after, dur)
+        self.ranges = apply_order(build_ranges(chosen, before, after, dur), self.project.order)
+        if self.project.order:                      # bỏ các khóa cũ không còn đoạn tương ứng
+            self.project.order = [range_key(r) for r in self.ranges]
         self.segments.set_ranges(self.ranges, {c.index: c for c in self.project.cues})
         self.timeline.view.set_segments([(r.start_ms, r.end_ms, P["ok"]) for r in self.ranges])
         self.segments.set_preview_enabled(bool(self.ranges) and self.player.is_ready())
@@ -177,7 +181,16 @@ class MainWindow(QMainWindow):
             return
         stem = os.path.splitext(os.path.basename(self.video.path))[0]
         default = os.path.join(os.path.dirname(self.video.path), f"{stem}_cut.mp4")
-        ExportDialog(self, ffmpeg, self.video, [(r.start_ms, r.end_ms) for r in self.ranges], default).exec()
+        ExportDialog(self, ffmpeg, self.video, [(r.start_ms, r.end_ms) for r in self.ranges], default,
+                     self.project.cues).exec()
+
+    def _on_order_changed(self, keys: list) -> None:
+        self.project.order = [int(k) for k in keys]
+        self._refresh_chosen()
+
+    def _reset_order(self) -> None:
+        self.project.order = []
+        self._refresh_chosen()
 
     def _clear_chosen(self) -> None:
         for c in self.project.cues:
@@ -271,6 +284,7 @@ class MainWindow(QMainWindow):
             return
         self.project.srt_path = path
         self.project.cues = result.cues
+        self.project.order = []
         self.subtitles.set_cues(result.cues)
         self._refresh_chosen()
         self.sidebar.refresh_project()

@@ -137,6 +137,10 @@ class SubtitlePanel(Panel):
         self.search.setPlaceholderText("Tìm trong phụ đề (không cần gõ dấu)")
         self.search.setClearButtonEnabled(True)
         self.body.addWidget(self.search)
+        self.btn_add_all = IconButton("plus", "Đưa tất cả các dòng đang hiện sau khi tìm vào video",
+                                      label="Thêm tất cả kết quả")
+        self.btn_add_all.hide()
+        self.body.addWidget(self.btn_add_all)
 
         self.model = CueModel()
         self.proxy = CueFilter()
@@ -186,6 +190,7 @@ class SubtitlePanel(Panel):
                 sc.activated.connect(lambda m=mark: self.set_mark_on_selection(m))
 
         self.search.textChanged.connect(self._on_search)
+        self.btn_add_all.clicked.connect(self.add_all_matches)
         self.view.selectionModel().selectionChanged.connect(self._on_selection)
         self.view.selectionModel().currentChanged.connect(self._on_current)
 
@@ -207,6 +212,23 @@ class SubtitlePanel(Panel):
     def _on_search(self, text: str) -> None:
         self.proxy.set_needle(text)
         self._update_count()
+        shown = self.proxy.rowCount()
+        has_query = bool(text.strip()) and shown > 0
+        self.btn_add_all.setVisible(has_query)
+        if has_query:
+            self.btn_add_all.set_label(f"Thêm tất cả {shown:,} kết quả".replace(",", "."))
+
+    def add_all_matches(self) -> None:
+        """Đánh dấu mọi dòng đang hiện (khớp từ khóa) là đã chọn vào video."""
+        changed = False
+        for row in range(self.proxy.rowCount()):
+            cue = self.proxy.index(row, 0).data(CUE_ROLE)
+            if cue.mark != "selected":
+                cue.mark = "selected"
+                changed = True
+        if changed:
+            self.view.viewport().update()
+            self.chosenChanged.emit()
 
     def set_mark_on_selection(self, mark: str) -> None:
         cues = self.selected_cues()

@@ -26,7 +26,8 @@ class ExportError(RuntimeError):
 
 @dataclass
 class ExportOptions:
-    height: int = 0            # 0 = giữ nguyên độ phân giải
+    width: int = 0             # width và height cùng > 0 thì đổi kích thước; 0 = giữ nguyên
+    height: int = 0
     fps: float = 0.0           # 0 = giữ fps của video gốc (làm tròn)
     crf: int = 21              # càng nhỏ càng nét, file càng lớn
     preset: str = "veryfast"
@@ -36,6 +37,29 @@ class ExportOptions:
 
 def _sec(ms: int) -> str:
     return f"{ms / 1000:.3f}"
+
+
+def target_size(src_w: int, src_h: int, short_side: int) -> tuple[int, int]:
+    """Kích thước mới theo CẠNH NGẮN (đúng cho cả video ngang lẫn video dọc), giữ tỉ lệ, số chẵn."""
+    def even(x: float) -> int:
+        return max(2, int(round(x / 2)) * 2)
+    if src_w <= src_h:
+        return even(short_side), even(src_h * short_side / src_w)
+    return even(src_w * short_side / src_h), even(short_side)
+
+
+def resolution_choices(src_w: int, src_h: int) -> list[tuple[str, int, int]]:
+    """Danh sách lựa chọn (nhãn, rộng, cao); (0, 0) là giữ nguyên. Chỉ cho phóng to lên 1080p, không thu nhỏ nhầm."""
+    choices = [(f"Giữ nguyên ({src_w}×{src_h})", 0, 0)]
+    short = min(src_w, src_h)
+    for target in (1080, 720, 480):
+        if target < short:
+            w, h = target_size(src_w, src_h, target)
+            choices.append((f"{target}p ({w}×{h})", w, h))
+        elif target > short and target == 1080:
+            w, h = target_size(src_w, src_h, target)
+            choices.append((f"1080p ({w}×{h}) — phóng to", w, h))
+    return choices
 
 
 def effective_fps(opts: ExportOptions, src_fps: float) -> float:
@@ -49,7 +73,10 @@ def effective_fps(opts: ExportOptions, src_fps: float) -> float:
 def build_segment_cmd(ffmpeg: str, src: str, start_ms: int, end_ms: int, out: str,
                       opts: ExportOptions, has_audio: bool, src_fps: float) -> list[str]:
     dur = max(1, end_ms - start_ms)
-    scale = f"scale=-2:{opts.height}" if opts.height > 0 else "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+    if opts.width > 0 and opts.height > 0:
+        scale = f"scale={opts.width}:{opts.height}:flags=lanczos"        # lanczos giữ nét tốt hơn bicubic mặc định
+    else:
+        scale = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
     vf = f"{scale},fps={effective_fps(opts, src_fps):g},format=yuv420p"
     cmd = [ffmpeg, "-y", "-nostdin", "-loglevel", "error",
            "-ss", _sec(start_ms), "-i", src, "-t", _sec(dur),

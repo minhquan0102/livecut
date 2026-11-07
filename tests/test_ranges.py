@@ -4,7 +4,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from editor.ranges import SequenceTracker, build_ranges, total_ms
+from editor.ranges import SequenceTracker, apply_order, build_ranges, cut_cues, range_key, total_ms
 from subtitle.srt import Cue
 
 
@@ -69,6 +69,64 @@ class SequenceTrackerTests(unittest.TestCase):
         t.begin(0)
         t.on_position(1_050)
         self.assertEqual(t.on_position(1_990), ("done", -1))
+
+
+class OrderTests(unittest.TestCase):
+    def ranges(self):
+        return build_ranges([cue(1, 10_000, 12_000), cue(2, 60_000, 62_000), cue(3, 120_000, 121_000)], 0, 0)
+
+    def test_empty_order_is_chronological(self):
+        self.assertEqual([range_key(r) for r in apply_order(self.ranges(), [])], [1, 2, 3])
+
+    def test_custom_order(self):
+        self.assertEqual([range_key(r) for r in apply_order(self.ranges(), [3, 1, 2])], [3, 1, 2])
+
+    def test_new_range_appended_and_stale_keys_ignored(self):
+        got = apply_order(self.ranges(), [3, 99, 1])          # 99 không còn; 2 là đoạn mới
+        self.assertEqual([range_key(r) for r in got], [3, 1, 2])
+
+    def test_duplicate_keys_do_not_duplicate_ranges(self):
+        self.assertEqual(len(apply_order(self.ranges(), [1, 1, 2, 3])), 3)
+
+    def test_project_roundtrip_keeps_order_and_marks(self):
+        from project.model import Project
+        pr = Project(cues=[cue(1, 0, 1000), cue(2, 2000, 3000)], order=[2, 1])
+        pr.cues[1].mark = "selected"
+        back = Project.from_dict(pr.to_dict())
+        self.assertEqual(back.order, [2, 1])
+        self.assertEqual(back.cues[1].mark, "selected")
+
+    def test_old_project_without_order_loads(self):
+        from project.model import Project
+        d = Project().to_dict()
+        d.pop("order")
+        self.assertEqual(Project.from_dict(d).order, [])
+
+
+class CutCuesTests(unittest.TestCase):
+    def test_times_shift_by_output_position(self):
+        cues = [cue(1, 10_000, 12_000, "a"), cue(2, 60_000, 62_000, "b")]
+        out = cut_cues([(9_700, 12_300), (59_700, 62_300)], cues, {1, 2})
+        self.assertEqual([(c.start_ms, c.end_ms, c.text) for c in out],
+                         [(300, 2_300, "a"), (2_600 + 300, 2_600 + 2_300, "b")])
+        self.assertEqual([c.index for c in out], [1, 2])
+
+    def test_follows_custom_order(self):
+        cues = [cue(1, 10_000, 12_000, "a"), cue(2, 60_000, 62_000, "b")]
+        out = cut_cues([(60_000, 62_000), (10_000, 12_000)], cues, {1, 2})
+        self.assertEqual([c.text for c in out], ["b", "a"])
+        self.assertEqual(out[1].start_ms, 2_000)
+
+    def test_neighbor_in_padding_only_dropped_if_too_short(self):
+        cues = [cue(1, 10_000, 12_000, "chosen"), cue(2, 12_100, 14_000, "neighbor")]
+        out = cut_cues([(9_700, 12_400)], cues, {1})           # neighbor chỉ lọt 300 ms
+        self.assertEqual([c.text for c in out], ["chosen", "neighbor"])
+        out = cut_cues([(9_700, 12_200)], cues, {1})           # neighbor chỉ lọt 100 ms -> bỏ
+        self.assertEqual([c.text for c in out], ["chosen"])
+
+    def test_clipped_to_range(self):
+        out = cut_cues([(10_500, 11_000)], [cue(1, 10_000, 12_000, "a")], {1})
+        self.assertEqual((out[0].start_ms, out[0].end_ms), (0, 500))
 
 
 if __name__ == "__main__":

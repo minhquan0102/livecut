@@ -10,13 +10,35 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from export.exporter import (ExportCancelled, ExportOptions, build_segment_cmd, export_ranges,
-                             parse_out_time_ms, write_concat_list)
+                             parse_out_time_ms, resolution_choices, target_size, write_concat_list)
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
 
 
 class PureTests(unittest.TestCase):
+    def test_target_size_uses_short_side_for_portrait_and_landscape(self):
+        self.assertEqual(target_size(720, 1280, 1080), (1080, 1920))
+        self.assertEqual(target_size(720, 1280, 480), (480, 854))
+        self.assertEqual(target_size(1920, 1080, 720), (1280, 720))
+
+    def test_portrait_720x1280_never_offers_a_downscale_labelled_1080p(self):
+        # lỗi cũ: video dọc 720x1280 chọn "1080p" bị thu nhỏ còn 608x1080
+        ch = resolution_choices(720, 1280)
+        self.assertEqual(ch[0][1:], (0, 0))
+        self.assertIn((1080, 1920), [c[1:] for c in ch])
+        self.assertTrue(all(w >= 2 and h >= 2 and w % 2 == 0 and h % 2 == 0 for _l, w, h in ch[1:]))
+        self.assertTrue(any("phóng to" in c[0] for c in ch if c[1:] == (1080, 1920)))
+        self.assertIn((480, 854), [c[1:] for c in ch])
+
+    def test_landscape_1080p_source_offers_only_downscales(self):
+        sizes = [c[1:] for c in resolution_choices(1920, 1080)]
+        self.assertEqual(sizes, [(0, 0), (1280, 720), (854, 480)])
+
+    def test_lanczos_scaler_used(self):
+        cmd = build_segment_cmd("ffmpeg", "a.mp4", 0, 1000, "o.mp4", ExportOptions(width=1080, height=1920), True, 30)
+        self.assertIn("scale=1080:1920:flags=lanczos", cmd[cmd.index("-vf") + 1])
+
     def test_parse_progress(self):
         self.assertEqual(parse_out_time_ms("out_time_us=2500000"), 2500)
         self.assertIsNone(parse_out_time_ms("frame=10"))
@@ -93,7 +115,7 @@ class RealExportTests(unittest.TestCase):
 
     def test_resolution_option(self):
         out = os.path.join(self.dir, "small.mp4")
-        export_ranges(FFMPEG, self.with_audio, [(0, 2_000)], out, ExportOptions(height=180), True, 30.0,
+        export_ranges(FFMPEG, self.with_audio, [(0, 2_000)], out, ExportOptions(width=320, height=180), True, 30.0,
                       os.path.join(self.dir, "w2"))
         _, _, streams = self.probe(out)
         v = next(s for s in streams if s["codec_type"] == "video")

@@ -63,6 +63,7 @@ class Project:
     cues: list[Cue] = field(default_factory=list)
     segments: list[Segment] = field(default_factory=list)
     groups: list[Group] = field(default_factory=list)
+    order: list[int] = field(default_factory=list)   # thứ tự đoạn do người dùng kéo thả (khóa = dòng SRT đầu tiên)
 
     def add_group(self, name: str) -> Group:
         g = Group(name=name.strip() or "Nhóm mới")
@@ -84,6 +85,7 @@ class Project:
             "cues": [asdict(c) for c in self.cues],
             "segments": [asdict(s) for s in self.segments],
             "groups": [asdict(g) for g in self.groups],
+            "order": list(self.order),
         }
 
     @classmethod
@@ -102,6 +104,7 @@ class Project:
             cues=[Cue(**c) for c in d.get("cues", [])],
             segments=[Segment(**s) for s in d.get("segments", [])],
             groups=groups,
+            order=[int(k) for k in d.get("order", [])],
         )
 
     def save(self, path: str | Path) -> None:

@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from subtitle.srt import Cue
+
 
 @dataclass
 class Range:
@@ -34,6 +36,42 @@ def build_ranges(cues, pad_before_ms: int = 300, pad_after_ms: int = 300,
             out[-1].cue_indexes.append(c.index)
         else:
             out.append(Range(s, e, [c.index]))
+    return out
+
+
+def range_key(r: Range) -> int:
+    """Định danh ổn định của một đoạn: chỉ số dòng phụ đề đầu tiên của nó."""
+    return r.cue_indexes[0]
+
+
+def apply_order(ranges: list[Range], order: list[int]) -> list[Range]:
+    """Sắp theo thứ tự người dùng đã kéo thả. Đoạn mới (chưa có trong `order`) nối vào cuối, theo thời gian."""
+    remaining = {range_key(r): r for r in ranges}
+    out = [remaining.pop(k) for k in order if k in remaining]
+    out.extend(r for r in ranges if range_key(r) in remaining)
+    return out
+
+
+MIN_OVERLAP_MS = 250
+
+
+def cut_cues(ranges: list[tuple[int, int]], cues: list[Cue], chosen: set[int]) -> list[Cue]:
+    """Phụ đề khớp với video đã cắt: dời mốc thời gian theo vị trí mới của từng đoạn.
+
+    Dòng được chọn luôn có mặt; dòng lân cận chỉ bị lọt vào phần đệm thì chỉ giữ khi hiện đủ lâu.
+    """
+    ordered = sorted(cues, key=lambda c: c.start_ms)
+    out: list[Cue] = []
+    offset = 0
+    for start, end in ranges:
+        for c in ordered:
+            a, b = max(c.start_ms, start), min(c.end_ms, end)
+            overlap = b - a
+            if overlap <= 0:
+                continue
+            if c.index in chosen or overlap >= min(MIN_OVERLAP_MS, c.end_ms - c.start_ms):
+                out.append(Cue(len(out) + 1, a - start + offset, b - start + offset, c.text))
+        offset += end - start
     return out
 
 

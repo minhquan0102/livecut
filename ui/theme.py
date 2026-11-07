@@ -61,6 +61,11 @@ QStatusBar::item { border: none; }
 QPushButton { background: @raised@; border: 1px solid @border_strong@; border-radius: 8px; padding: 6px 14px; }
 QPushButton:hover { background: @hover@; }
 QDialog QLabel { background: transparent; }
+QCheckBox { spacing: 8px; }
+QCheckBox::indicator { width: 16px; height: 16px; border-radius: 4px;
+    border: 1px solid @border_strong@; background: @raised@; }
+QCheckBox::indicator:hover { border-color: @accent@; }
+QCheckBox::indicator:checked { background: @accent@; border-color: @accent@; }
 """
 
 

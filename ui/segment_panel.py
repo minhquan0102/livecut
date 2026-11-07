@@ -1,15 +1,16 @@
 """Danh sách đoạn video được tạo từ các dòng phụ đề đã chọn, có đệm và nút xem thử liên tiếp."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QDoubleSpinBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtWidgets import (QAbstractItemView, QDoubleSpinBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
                                QStackedWidget)
 
-from editor.ranges import Range, total_ms
+from editor.ranges import Range, range_key, total_ms
 from utils.timecode import format_clock
 from .widgets import EmptyState, IconButton, Panel
 
 MAX_TEXT = 140
+KEY_ROLE = int(Qt.UserRole) + 1
 
 
 class SegmentPanel(Panel):
@@ -17,16 +18,20 @@ class SegmentPanel(Panel):
     clearRequested = Signal()
     rangeActivated = Signal(int)     # start_ms của đoạn được nhấp
     paddingChanged = Signal()
+    orderChanged = Signal(list)      # danh sách khóa đoạn theo thứ tự mới sau khi kéo thả
+    sortRequested = Signal()         # trả về thứ tự theo thời gian
 
     def __init__(self, parent=None) -> None:
         super().__init__("Đoạn video", parent)
         self.count_label = QLabel("")
         self.count_label.setObjectName("Small")
+        self.btn_sort = IconButton("layers", "Sắp lại các đoạn theo thứ tự thời gian trong video")
         self.btn_clear = IconButton("trash", "Bỏ chọn tất cả các đoạn")
         self.btn_preview = IconButton("play", "Xem thử lần lượt các đoạn đã chọn như một video",
                                       label="Xem thử", variant="primary")
-        for w in (self.count_label, self.btn_clear, self.btn_preview):
+        for w in (self.count_label, self.btn_sort, self.btn_clear, self.btn_preview):
             self.add_action(w)
+        self.btn_sort.setEnabled(False)
         self.btn_clear.setEnabled(False)
         self.btn_preview.setEnabled(False)
 
@@ -46,6 +51,9 @@ class SegmentPanel(Panel):
                                 "Chọn các dòng phụ đề (giữ Ctrl để chọn nhiều), rồi bấm “Thêm vào video”.")
         self.list = QListWidget()
         self.list.setWordWrap(True)
+        self.list.setDragDropMode(QAbstractItemView.InternalMove)   # kéo thả để đổi thứ tự
+        self.list.setDefaultDropAction(Qt.MoveAction)
+        self.list.setToolTip("Kéo thả để đổi thứ tự các đoạn. Video xuất sẽ theo đúng thứ tự này.")
         self.stack = QStackedWidget()
         self.stack.addWidget(self.empty)
         self.stack.addWidget(self.list)
@@ -55,6 +63,9 @@ class SegmentPanel(Panel):
         self.pad_after.valueChanged.connect(lambda _v: self.paddingChanged.emit())
         self.btn_preview.clicked.connect(self.previewRequested)
         self.btn_clear.clicked.connect(self.clearRequested)
+        self.btn_sort.clicked.connect(self.sortRequested)
+        # emit sau khi thao tác kéo thả kết thúc (không dựng lại danh sách ngay trong lúc đang thả)
+        self.list.model().rowsMoved.connect(lambda *_a: QTimer.singleShot(0, self._emit_order))
         self.list.itemClicked.connect(lambda it: self.rangeActivated.emit(int(it.data(Qt.UserRole))))
 
     @staticmethod
@@ -83,10 +94,15 @@ class SegmentPanel(Panel):
                 f"{n:02d}   {format_clock(r.start_ms)} → {format_clock(r.end_ms)}   ·   "
                 f"{r.duration_ms / 1000:.1f}s\n{text}")
             item.setData(Qt.UserRole, r.start_ms)
+            item.setData(KEY_ROLE, range_key(r))
             self.list.addItem(item)
         self.stack.setCurrentIndex(1 if ranges else 0)
         self.btn_clear.setEnabled(bool(ranges))
+        self.btn_sort.setEnabled(len(ranges) > 1)
         self.count_label.setText(f"{len(ranges)} đoạn · {format_clock(total_ms(ranges))}" if ranges else "")
+
+    def _emit_order(self) -> None:
+        self.orderChanged.emit([self.list.item(i).data(KEY_ROLE) for i in range(self.list.count())])
 
     def set_preview_enabled(self, on: bool) -> None:
         self.btn_preview.setEnabled(on)
