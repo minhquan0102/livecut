@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
+from .framing import FrameSpec, video_filter
+
 
 class ExportCancelled(RuntimeError):
     pass
@@ -33,6 +35,9 @@ class ExportOptions:
     preset: str = "veryfast"
     audio_bitrate: str = "192k"
     fade_ms: int = 20          # fade âm thanh ở hai đầu mỗi đoạn
+    frame: FrameSpec | None = None   # đổi tỉ lệ khung (cần width/height đích và src_w/src_h)
+    src_w: int = 0
+    src_h: int = 0
 
 
 def _sec(ms: int) -> str:
@@ -73,17 +78,20 @@ def effective_fps(opts: ExportOptions, src_fps: float) -> float:
 def build_segment_cmd(ffmpeg: str, src: str, start_ms: int, end_ms: int, out: str,
                       opts: ExportOptions, has_audio: bool, src_fps: float) -> list[str]:
     dur = max(1, end_ms - start_ms)
-    if opts.width > 0 and opts.height > 0:
-        scale = f"scale={opts.width}:{opts.height}:flags=lanczos"        # lanczos giữ nét tốt hơn bicubic mặc định
+    tail = f"fps={effective_fps(opts, src_fps):g},format=yuv420p"
+    if opts.frame is not None and opts.width > 0 and opts.height > 0 and opts.src_w > 0 and opts.src_h > 0:
+        vargs, vmap = video_filter(opts.frame, opts.src_w, opts.src_h, opts.width, opts.height, tail)
     else:
-        scale = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
-    vf = f"{scale},fps={effective_fps(opts, src_fps):g},format=yuv420p"
+        if opts.width > 0 and opts.height > 0:
+            scale = f"scale={opts.width}:{opts.height}:flags=lanczos"    # lanczos giữ nét tốt hơn bicubic mặc định
+        else:
+            scale = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+        vargs, vmap = ["-vf", f"{scale},{tail}"], ["-map", "0:v:0"]
     cmd = [ffmpeg, "-y", "-nostdin", "-loglevel", "error",
-           "-ss", _sec(start_ms), "-i", src, "-t", _sec(dur),
-           "-map", "0:v:0"]
+           "-ss", _sec(start_ms), "-i", src, "-t", _sec(dur), *vmap]
     if has_audio:
         cmd += ["-map", "0:a:0"]
-    cmd += ["-vf", vf, "-c:v", "libx264", "-preset", opts.preset, "-crf", str(opts.crf),
+    cmd += [*vargs, "-c:v", "libx264", "-preset", opts.preset, "-crf", str(opts.crf),
             "-video_track_timescale", "90000"]
     if has_audio:
         fade = min(opts.fade_ms, dur // 2) / 1000

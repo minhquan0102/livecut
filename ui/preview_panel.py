@@ -8,7 +8,6 @@ from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel, QSlider, 
 from utils.timecode import format_clock
 from .widgets import EmptyState, IconButton, Panel
 
-MARK_NOTE = "Chưa hoạt động: đánh dấu IN/OUT có từ giai đoạn 6 (chọn đoạn thủ công)."
 RATES = [0.5, 1.0, 1.5, 2.0]
 SKIP_MS = 5000
 
@@ -20,6 +19,8 @@ class PreviewPanel(Panel):
     speedChanged = Signal(float)
     volumeChanged = Signal(int)
     muteToggled = Signal(bool)
+    markIn = Signal()
+    markOut = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__("Xem trước", parent)
@@ -43,8 +44,8 @@ class PreviewPanel(Panel):
         self.btn_back = IconButton("back", "Tua lùi 5 giây")
         self.btn_play = IconButton("play", "Phát / Tạm dừng (Space)")
         self.btn_fwd = IconButton("forward", "Tua nhanh 5 giây")
-        self.btn_in = IconButton("mark-in", MARK_NOTE)
-        self.btn_out = IconButton("mark-out", MARK_NOTE)
+        self.btn_in = IconButton("mark-in", "Đánh dấu điểm bắt đầu (phím I)")
+        self.btn_out = IconButton("mark-out", "Đánh dấu điểm kết thúc và thêm khoảng vào video (phím O)")
         self.time_label = QLabel("00:00 / 00:00")
         self.time_label.setObjectName("Muted")
         self.speed = QComboBox()
@@ -78,16 +79,17 @@ class PreviewPanel(Panel):
         self.volume.valueChanged.connect(self.volumeChanged)
         self.btn_mute.toggled.connect(self._on_mute)
 
+        self.btn_in.clicked.connect(self.markIn)
+        self.btn_out.clicked.connect(self.markOut)
         self.set_controls_enabled(False)
-        for w in (self.btn_in, self.btn_out):     # IN/OUT thuộc giai đoạn 6 — luôn khóa
-            w.setEnabled(False)
 
     # --- API cho MainWindow ---
     def attach_video_widget(self, w: QWidget) -> None:
         self.stack.addWidget(w)                   # trang 1: video
 
     def set_controls_enabled(self, on: bool) -> None:
-        for w in (self.btn_back, self.btn_play, self.btn_fwd, self.speed, self.btn_mute, self.volume):
+        for w in (self.btn_back, self.btn_play, self.btn_fwd, self.speed, self.btn_mute, self.volume,
+                  self.btn_in, self.btn_out):
             w.setEnabled(on)
 
     def show_video_loaded(self, name: str, duration_ms: int) -> None:

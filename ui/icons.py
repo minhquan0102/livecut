@@ -26,6 +26,7 @@ _BODY = {
     "mute": _SPK + '<path d="M17 9l5 6M22 9l-5 6"/>',
     "search": _MAG,
     "plus": '<path d="M12 5v14M5 12h14"/>',
+    "x": '<path d="M6 6l12 12M18 6L6 18"/>',
     "edit": '<path d="M4 20h4L19 9l-4-4L4 16z"/>',
     "trash": '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/>',
     "layers": '<path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/>',

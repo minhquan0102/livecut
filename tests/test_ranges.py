@@ -4,7 +4,9 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from editor.ranges import SequenceTracker, apply_order, build_ranges, cut_cues, range_key, total_ms
+from editor.ranges import (SequenceTracker, apply_order, build_ranges, combine, cut_cues, manual_ranges, range_key,
+                           total_ms, validate_range)
+from project.model import ManualRange, Project
 from subtitle.srt import Cue
 
 
@@ -88,6 +90,13 @@ class OrderTests(unittest.TestCase):
     def test_duplicate_keys_do_not_duplicate_ranges(self):
         self.assertEqual(len(apply_order(self.ranges(), [1, 1, 2, 3])), 3)
 
+    def test_validate_typed_range(self):
+        self.assertEqual(validate_range("0:10", "0:20.5", 60000), (10000, 20500))
+        self.assertEqual(validate_range("5", "999", 60000), (5000, 60000))
+        for bad in (("0:20", "0:10"), ("2:00", "3:00"), ("x", "1"), ("1", "1.05")):
+            with self.assertRaises(ValueError):
+                validate_range(*bad, 60000)
+
     def test_project_roundtrip_keeps_order_and_marks(self):
         from project.model import Project
         pr = Project(cues=[cue(1, 0, 1000), cue(2, 2000, 3000)], order=[2, 1])
@@ -127,6 +136,50 @@ class CutCuesTests(unittest.TestCase):
     def test_clipped_to_range(self):
         out = cut_cues([(10_500, 11_000)], [cue(1, 10_000, 12_000, "a")], {1})
         self.assertEqual((out[0].start_ms, out[0].end_ms), (0, 500))
+
+
+class ManualRangeTests(unittest.TestCase):
+    def test_clamp_and_drop_tiny(self):
+        r = manual_ranges([ManualRange(1, -500, 4000), ManualRange(2, 9000, 12000), ManualRange(3, 5000, 5050),
+                           ManualRange(4, 11000, 15000)], duration_ms=10000)
+        self.assertEqual([(x.start_ms, x.end_ms, range_key(x)) for x in r], [(0, 4000, -1), (9000, 10000, -2)])
+        self.assertTrue(all(x.manual for x in r))
+
+    def test_combine_sorted_and_order_covers_both(self):
+        srt = build_ranges([Cue(7, 5000, 6000, "a"), Cue(9, 20000, 21000, "b")], 0, 0)
+        man = manual_ranges([ManualRange(1, 10000, 12000)])
+        both = combine(srt, man)
+        self.assertEqual([range_key(r) for r in both], [7, -1, 9])
+        self.assertEqual([range_key(r) for r in apply_order(both, [9, -1])], [9, -1, 7])
+
+    def test_manual_does_not_merge_with_srt(self):
+        srt = build_ranges([Cue(1, 5000, 6000, "a")], 0, 0)
+        both = combine(srt, manual_ranges([ManualRange(1, 5500, 8000)]))
+        self.assertEqual(len(both), 2)
+
+    def test_cut_cues_includes_lines_inside_manual_range(self):
+        cues = [Cue(1, 1000, 2000, "x"), Cue(2, 3000, 4000, "y")]
+        out = cut_cues([(500, 2500)], cues, set())
+        self.assertEqual([(c.start_ms, c.end_ms, c.text) for c in out], [(500, 1500, "x")])
+
+    def test_validate_typed_range(self):
+        self.assertEqual(validate_range("0:10", "0:20.5", 60000), (10000, 20500))
+        self.assertEqual(validate_range("5", "999", 60000), (5000, 60000))
+        for bad in (("0:20", "0:10"), ("2:00", "3:00"), ("x", "1"), ("1", "1.05")):
+            with self.assertRaises(ValueError):
+                validate_range(*bad, 60000)
+
+    def test_project_roundtrip_and_old_files(self):
+        p = Project()
+        a, b = p.add_manual(1000, 2000), p.add_manual(3000, 4000)
+        self.assertEqual((a.id, b.id), (1, 2))
+        p.manual.remove(a)
+        self.assertEqual(p.add_manual(5000, 6000).id, 3)
+        q = Project.from_dict(p.to_dict())
+        self.assertEqual([(m.id, m.start_ms, m.end_ms) for m in q.manual], [(2, 3000, 4000), (3, 5000, 6000)])
+        d = p.to_dict()
+        d.pop("manual")
+        self.assertEqual(Project.from_dict(d).manual, [])
 
 
 if __name__ == "__main__":

@@ -3,20 +3,25 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
-from PySide6.QtCore import QUrl
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QMessageBox, QProgressBar, QPushButton, QVBoxLayout)
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QPixmap
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout,
+                               QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton, QSlider, QVBoxLayout,
+                               QWidget)
 
 from editor.ranges import cut_cues
+from export import framing
 from export.exporter import ExportOptions, resolution_choices
+from export.framing import ASPECTS, MAX_ZOOM, MODES, FrameSpec, size_choices
 from export.worker import ExportWorker
 from services import ffmpeg_locator
 from services.ffprobe import VideoInfo
 from subtitle.srt import Cue, serialize_srt
 from utils import paths
 from utils.timecode import format_clock
+from .frame_editor import FrameEditor
 from .theme import P
 
 # (nhãn, CRF, preset): CRF càng nhỏ càng nét; preset chậm hơn nén hiệu quả hơn
@@ -36,10 +41,10 @@ _PROGRESS = (f"QProgressBar {{ background: {P['raised']}; border: none; border-r
 
 class ExportDialog(QDialog):
     def __init__(self, parent, ffmpeg: str, info: VideoInfo, ranges: list[tuple[int, int]],
-                 default_path: str, cues: list[Cue] | None = None) -> None:
+                 default_path: str, cues: list[Cue] | None = None, position_ms: int = 0) -> None:
         super().__init__(parent)
         self.setWindowTitle("Xuất video")
-        self.setMinimumWidth(580)
+        self.setMinimumWidth(640)
         self._ffmpeg, self._info, self._ranges = ffmpeg, info, ranges
         self._cues = cues or []
         self._worker: ExportWorker | None = None
@@ -66,18 +71,49 @@ class ExportDialog(QDialog):
         prow = QHBoxLayout()
         prow.addWidget(self.path, 1)
         prow.addWidget(self.btn_browse)
+        self.aspect = QComboBox()
+        for label, _a in ASPECTS:
+            self.aspect.addItem(label)
+        self.mode = QComboBox()
+        for label, _m in MODES:
+            self.mode.addItem(label)
         self.res = QComboBox()
-        self._res = resolution_choices(info.width, info.height)
-        for label, _w, _h in self._res:
-            self.res.addItem(label)
+        self._res: list[tuple[str, int, int]] = []
         self.quality = QComboBox()
         for label, _crf, _preset in QUALITY:
             self.quality.addItem(label)
         self.quality.setCurrentIndex(1)
         form.addRow("Lưu tại", prow)
+        form.addRow("Tỷ lệ khung", self.aspect)
+        form.addRow("Cách lấp khung", self.mode)
         form.addRow("Độ phân giải", self.res)
         form.addRow("Chất lượng", self.quality)
         lay.addLayout(form)
+
+        # khung kéo được trên hình video (chỉ hiện khi chọn "Cắt vừa khung")
+        self.editor_box = QWidget()
+        eb = QVBoxLayout(self.editor_box)
+        eb.setContentsMargins(0, 0, 0, 0)
+        eb.setSpacing(8)
+        self.editor = FrameEditor()
+        eb.addWidget(self.editor)
+        zrow = QHBoxLayout()
+        zlab = QLabel("Thu phóng")
+        zlab.setObjectName("Small")
+        self.zoom = QSlider(Qt.Horizontal)
+        self.zoom.setRange(10, int(MAX_ZOOM * 10))
+        self.zoom.setValue(10)
+        self.btn_reset_frame = QPushButton("Đặt lại")
+        zrow.addWidget(zlab)
+        zrow.addWidget(self.zoom, 1)
+        zrow.addWidget(self.btn_reset_frame)
+        eb.addLayout(zrow)
+        fhint = QLabel("Kéo trên hình để chọn vùng giữ lại, cuộn chuột để thu phóng. "
+                       "Hình lấy tại vị trí video đang xem khi bạn bấm Xuất.")
+        fhint.setObjectName("Small")
+        fhint.setWordWrap(True)
+        eb.addWidget(fhint)
+        lay.addWidget(self.editor_box)
         self.chk_srt = QCheckBox("Xuất kèm file phụ đề .srt khớp với video mới")
         self.chk_srt.setChecked(True)
         self.chk_srt.setVisible(bool(self._cues))
@@ -105,10 +141,64 @@ class ExportDialog(QDialog):
         btns.addWidget(self.btn_start)
         lay.addLayout(btns)
 
+        self.aspect.currentIndexChanged.connect(self._on_aspect)
+        self.mode.currentIndexChanged.connect(self._update_frame_ui)
+        self.zoom.valueChanged.connect(lambda v: self.editor.set_zoom(v / 10))
+        self.editor.zoomChanged.connect(self._sync_zoom)
+        self.btn_reset_frame.clicked.connect(self.editor.reset)
+        self._load_still(position_ms)
+        self._on_aspect()
+
         self.btn_browse.clicked.connect(self._browse)
         self.btn_start.clicked.connect(self._start)
         self.btn_close.clicked.connect(self._close_or_cancel)
         self.btn_open.clicked.connect(self._open_folder)
+
+    # --- khung hình ---
+    def _selected_aspect(self) -> tuple[int, int] | None:
+        return ASPECTS[self.aspect.currentIndex()][1]
+
+    def _load_still(self, position_ms: int) -> None:
+        """Lấy một khung hình từ video làm hình tham chiếu cho việc chọn vùng."""
+        dur = self._info.duration_ms
+        ms = position_ms if 0 < position_ms < dur else (self._ranges[0][0] + 500 if self._ranges else 0)
+        tmp = str(paths.temp_dir() / f"still_{int(time.time() * 1000)}.jpg")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            if framing.extract_frame(self._ffmpeg, self._info.path, ms, tmp):
+                pm = QPixmap()
+                if pm.loadFromData(Path(tmp).read_bytes()):
+                    self.editor.set_pixmap(pm)
+        except OSError:
+            pass
+        finally:
+            QApplication.restoreOverrideCursor()
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+    def _on_aspect(self) -> None:
+        aspect = self._selected_aspect()
+        info = self._info
+        self._res = resolution_choices(info.width, info.height) if aspect is None else size_choices(aspect)
+        self.res.clear()
+        for label, _w, _h in self._res:
+            self.res.addItem(label)
+        self.editor.set_aspect(aspect)
+        self._update_frame_ui()
+
+    def _update_frame_ui(self) -> None:
+        has_aspect = self._selected_aspect() is not None
+        self.mode.setEnabled(has_aspect)
+        crop = has_aspect and MODES[self.mode.currentIndex()][1] == "crop"
+        self.editor_box.setVisible(crop)
+        self.adjustSize()
+
+    def _sync_zoom(self, zoom: float) -> None:
+        self.zoom.blockSignals(True)
+        self.zoom.setValue(round(zoom * 10))
+        self.zoom.blockSignals(False)
 
     # --- thao tác ---
     def _browse(self) -> None:
@@ -142,7 +232,13 @@ class ExportDialog(QDialog):
             return
         _label, w, h = self._res[self.res.currentIndex()]
         _q, crf, preset = QUALITY[self.quality.currentIndex()]
-        opts = ExportOptions(width=w, height=h, crf=crf, preset=preset)
+        aspect = self._selected_aspect()
+        frame = None
+        if aspect is not None:
+            cx, cy = self.editor.center()
+            frame = FrameSpec(aspect, MODES[self.mode.currentIndex()][1], cx, cy, self.editor.zoom())
+        opts = ExportOptions(width=w, height=h, crf=crf, preset=preset, frame=frame,
+                             src_w=self._info.width, src_h=self._info.height)
         work = str(paths.temp_dir() / f"export_{int(time.time())}")
         self._worker = ExportWorker(self._ffmpeg, self._info.path, self._ranges, out, opts,
                                     self._info.has_audio, self._info.fps, work, self)
@@ -158,7 +254,8 @@ class ExportDialog(QDialog):
         self._worker.start()
 
     def _set_running(self, on: bool) -> None:
-        for w in (self.path, self.btn_browse, self.res, self.quality, self.chk_srt, self.btn_start):
+        for w in (self.path, self.btn_browse, self.aspect, self.mode, self.res, self.quality, self.editor,
+                  self.zoom, self.btn_reset_frame, self.chk_srt, self.btn_start):
             w.setEnabled(not on)
         self.btn_close.setText("Hủy xuất" if on else "Đóng")
         self.btn_close.setEnabled(True)

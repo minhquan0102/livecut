@@ -7,7 +7,7 @@ from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QFileDialog, QMainWindow, QMessageBox, QSplitter, QVBoxLayout, QWidget)
 
-from editor.ranges import apply_order, build_ranges, range_key
+from editor.ranges import apply_order, build_ranges, combine, manual_ranges, range_key
 from player.sequence import SequencePreview
 from player.video_player import VideoPlayer
 from project.model import Project
@@ -16,8 +16,10 @@ from services.ffprobe import VideoInfo, probe
 from services.tasks import TaskRunner
 from subtitle.srt import parse_srt, read_srt_file, validate_cues
 from utils import paths
+from utils.timecode import format_clock
 from .export_dialog import ExportDialog
 from .preview_panel import PreviewPanel
+from .range_dialog import RangeDialog
 from .segment_panel import SegmentPanel
 from .sidebar import Sidebar
 from .subtitle_panel import SubtitlePanel
@@ -41,6 +43,8 @@ class MainWindow(QMainWindow):
         self.player = VideoPlayer(self)
         self.sequence = SequencePreview(self.player, self)
         self.ranges: list = []
+        self._editing_key: int | None = None     # khoảng thủ công đang chỉnh trên timeline
+        self._mark_in: int | None = None
         self.settings = QSettings("LiveCutStudio", "LiveCutStudio")
         self._build_ui()
         self._wire()
@@ -139,11 +143,19 @@ class MainWindow(QMainWindow):
         self.sequence.activeChanged.connect(self.segments.set_previewing)
         self.sequence.rangeChanged.connect(self.segments.highlight)
         self.sequence.finished.connect(lambda: self.statusBar().showMessage("Đã xem hết phần đã chọn", 4000))
+        # chọn khoảng tự do (kéo timeline, IN/OUT, nhập giờ)
+        self.timeline.addRangeRequested.connect(self._add_selection)
+        self.timeline.typeRangeRequested.connect(self._type_range)
+        self.preview.markIn.connect(self._mark_in_here)
+        self.preview.markOut.connect(self._mark_out_here)
+        self.segments.rangeClicked.connect(self._on_range_selected)
+        self.segments.rangeEditRequested.connect(self._type_range)
+        self.segments.removeRequested.connect(self._remove_ranges)
         p.loaded.connect(self._refresh_chosen)
         p.seekLatency.connect(lambda ms: self.statusBar().showMessage(f"Seek: {ms:.0f} ms", 3000))
         for seq, fn in (("Ctrl+O", self.import_video), ("Ctrl+Shift+O", self.import_srt),
                         ("Ctrl+P", self.open_project), ("Ctrl+S", self.save_project),
-                        ("Space", p.toggle), ("Ctrl+E", self.export_video), ("Ctrl+B", t.btn_sidebar.click), ("Ctrl+R", t.btn_right.click),
+                        ("Space", p.toggle), ("Ctrl+E", self.export_video), ("I", self._mark_in_here), ("O", self._mark_out_here), ("Ctrl+B", t.btn_sidebar.click), ("Ctrl+R", t.btn_right.click),
                         ("Ctrl+T", t.btn_bottom.click)):
             QShortcut(QKeySequence(seq), self, activated=fn)
 
@@ -158,17 +170,117 @@ class MainWindow(QMainWindow):
         chosen = [c for c in self.project.cues if c.mark == "selected"]
         before, after = self.segments.padding_ms()
         dur = self.video.duration_ms if self.video else 0
-        self.ranges = apply_order(build_ranges(chosen, before, after, dur), self.project.order)
+        both = combine(build_ranges(chosen, before, after, dur), manual_ranges(self.project.manual, dur))
+        self.ranges = apply_order(both, self.project.order)
         if self.project.order:                      # bỏ các khóa cũ không còn đoạn tương ứng
             self.project.order = [range_key(r) for r in self.ranges]
         self.segments.set_ranges(self.ranges, {c.index: c for c in self.project.cues})
-        self.timeline.view.set_segments([(r.start_ms, r.end_ms, P["ok"]) for r in self.ranges])
+        self.timeline.view.set_segments(
+            [(r.start_ms, r.end_ms, P["warn"] if r.manual else P["ok"]) for r in self.ranges])
+        if self._editing_key is not None and self._editing_key not in {range_key(r) for r in self.ranges}:
+            self._stop_editing()
         self.segments.set_preview_enabled(bool(self.ranges) and self.player.is_ready())
         can_export = bool(self.ranges) and self.video is not None
         self.topbar.export.setEnabled(can_export)
         self.topbar.export.setToolTip(
             "Xuất các đoạn đã chọn thành một file MP4 (Ctrl+E)" if can_export
-            else "Chọn câu phụ đề và bấm “Thêm vào video” trước khi xuất")
+            else "Chọn câu phụ đề hoặc kéo chọn một khoảng trên timeline trước khi xuất")
+
+    # --- khoảng tự chọn ---
+    def _duration(self) -> int:
+        return self.video.duration_ms if self.video else 0
+
+    def _stop_editing(self) -> None:
+        self._editing_key = None
+        self.timeline.set_editing(False)
+        self.timeline.set_selection(None)
+
+    def _add_selection(self) -> None:
+        """Thêm khoảng đang chọn trên timeline; nếu đang chỉnh một khoảng thì cập nhật nó."""
+        sel = self.timeline.view.selection()
+        if sel is not None:
+            self._commit_manual(*sel)
+
+    def _commit_manual(self, start: int, end: int) -> None:
+        m = self.project.manual_by_id(-self._editing_key) if self._editing_key is not None else None
+        if m is not None:
+            m.start_ms, m.end_ms = start, end
+            msg = "Đã cập nhật khoảng"
+        else:
+            self.project.add_manual(start, end)
+            msg = "Đã thêm khoảng"
+        self._editing_key = None
+        self.timeline.set_editing(False)
+        self.timeline.set_selection(None)
+        self._refresh_chosen()
+        self.statusBar().showMessage(f"{msg} {format_clock(start)} → {format_clock(end)}", 4000)
+
+    def _type_range(self, key=None) -> None:
+        """Hộp nhập giờ: thêm khoảng mới, hoặc sửa khoảng thủ công `key` (nhấp đúp trong danh sách)."""
+        if self.video is None:
+            return
+        if isinstance(key, int) and key < 0 and self.project.manual_by_id(-key) is not None:
+            m = self.project.manual_by_id(-key)
+            a, b = m.start_ms, m.end_ms
+            self._editing_key = key
+            self.timeline.set_editing(True)
+        else:
+            sel = self.timeline.view.selection()
+            a, b = sel if sel else (self.player.position(), self.player.position() + 5000)
+        dlg = RangeDialog(self, a, b, self._duration(), editing=self._editing_key is not None)
+        if dlg.exec() and dlg.result_range:
+            self._commit_manual(*dlg.result_range)
+        elif isinstance(key, int) and key < 0:
+            self._stop_editing()
+
+    def _mark_in_here(self) -> None:
+        if self.video is None or not self.player.is_ready():
+            return
+        self._mark_in = self.player.position()
+        self.timeline.view.set_mark_in(self._mark_in)
+        self.statusBar().showMessage(f"IN tại {format_clock(self._mark_in)} — bấm O để chốt điểm kết thúc", 5000)
+
+    def _mark_out_here(self) -> None:
+        if self.video is None or not self.player.is_ready():
+            return
+        if self._mark_in is None:
+            self.statusBar().showMessage("Bấm I (hoặc nút IN) để đánh dấu điểm bắt đầu trước", 4000)
+            return
+        end = self.player.position()
+        if end - self._mark_in < 100:
+            self.statusBar().showMessage("Điểm OUT phải sau điểm IN", 4000)
+            return
+        start, self._mark_in = self._mark_in, None
+        self.timeline.view.set_mark_in(None)
+        self._editing_key = None
+        self._commit_manual(start, end)
+
+    def _on_range_selected(self, key: int) -> None:
+        """Nhấp một đoạn trong danh sách: nếu là khoảng thủ công thì nạp lên timeline để kéo tay nắm."""
+        m = self.project.manual_by_id(-key) if key < 0 else None
+        if m is None:
+            if self._editing_key is not None:
+                self._stop_editing()
+            return
+        self._editing_key = key
+        self.timeline.set_editing(True)
+        self.timeline.set_selection((m.start_ms, m.end_ms), reveal=True)
+
+    def _remove_ranges(self, keys: list) -> None:
+        by_key = {range_key(r): r for r in self.ranges}
+        for k in keys:
+            r = by_key.get(k)
+            if r is None:
+                continue
+            if k < 0:
+                self.project.manual = [m for m in self.project.manual if m.id != -k]
+            else:
+                for c in self.project.cues:
+                    if c.index in r.cue_indexes and c.mark == "selected":
+                        c.mark = ""
+        self.project.order = [k for k in self.project.order if k not in set(keys)]
+        self.subtitles.refresh_marks()
+        self._refresh_chosen()
 
     def export_video(self) -> None:
         if not self.ranges or self.video is None:
@@ -182,7 +294,7 @@ class MainWindow(QMainWindow):
         stem = os.path.splitext(os.path.basename(self.video.path))[0]
         default = os.path.join(os.path.dirname(self.video.path), f"{stem}_cut.mp4")
         ExportDialog(self, ffmpeg, self.video, [(r.start_ms, r.end_ms) for r in self.ranges], default,
-                     self.project.cues).exec()
+                     self.project.cues, self.player.position()).exec()
 
     def _on_order_changed(self, keys: list) -> None:
         self.project.order = [int(k) for k in keys]
@@ -193,6 +305,8 @@ class MainWindow(QMainWindow):
         self._refresh_chosen()
 
     def _clear_chosen(self) -> None:
+        self.project.manual = []
+        self._stop_editing()
         for c in self.project.cues:
             if c.mark == "selected":
                 c.mark = ""
@@ -262,6 +376,8 @@ class MainWindow(QMainWindow):
         self.sidebar.set_video(info)
         self.sidebar.refresh_project()
         self.timeline.set_duration(info.duration_ms)
+        self._mark_in = None
+        self._stop_editing()
         self._refresh_chosen()
         self.preview.show_video_loaded(os.path.basename(info.path), info.duration_ms)
         self.player.load(info.path)
@@ -335,6 +451,9 @@ class MainWindow(QMainWindow):
         self.sidebar.set_video(None)
         self.subtitles.set_cues(project.cues)
         self.timeline.set_duration(0)
+        self._mark_in = None
+        self._editing_key = None
+        self.timeline.set_editing(False)
         self.player.unload()
         self.preview.reset()
         self._refresh_chosen()

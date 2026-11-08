@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from subtitle.srt import Cue
+from utils.timecode import parse_timecode
 
 
 @dataclass
@@ -14,6 +15,11 @@ class Range:
     start_ms: int
     end_ms: int
     cue_indexes: list[int] = field(default_factory=list)
+    key: int | None = None          # None = đoạn từ phụ đề (khóa là dòng đầu); âm = khoảng thủ công
+
+    @property
+    def manual(self) -> bool:
+        return self.key is not None and self.key < 0
 
     @property
     def duration_ms(self) -> int:
@@ -40,8 +46,42 @@ def build_ranges(cues, pad_before_ms: int = 300, pad_after_ms: int = 300,
 
 
 def range_key(r: Range) -> int:
-    """Định danh ổn định của một đoạn: chỉ số dòng phụ đề đầu tiên của nó."""
-    return r.cue_indexes[0]
+    """Định danh ổn định của một đoạn: dòng phụ đề đầu tiên; khoảng thủ công dùng số âm (-id)."""
+    return r.key if r.key is not None else r.cue_indexes[0]
+
+
+MIN_MANUAL_MS = 100
+
+
+def manual_ranges(manual, duration_ms: int = 0) -> list[Range]:
+    """Khoảng thủ công -> Range: kẹp trong [0, duration], bỏ khoảng quá ngắn; không đệm, không gộp."""
+    out: list[Range] = []
+    for m in manual:
+        s, e = max(0, m.start_ms), m.end_ms
+        if duration_ms > 0:
+            s, e = min(s, duration_ms), min(e, duration_ms)
+        if e - s >= MIN_MANUAL_MS:
+            out.append(Range(s, e, [], key=-m.id))
+    return out
+
+
+def validate_range(start_text: str, end_text: str, duration_ms: int) -> tuple[int, int]:
+    """Đọc và kiểm tra hai mốc; ném ValueError kèm lời nhắc tiếng Việt nếu sai."""
+    start, end = parse_timecode(start_text), parse_timecode(end_text)
+    if duration_ms > 0 and start >= duration_ms:
+        raise ValueError("Thời gian bắt đầu nằm sau cuối video.")
+    if end <= start:
+        raise ValueError("Thời gian kết thúc phải lớn hơn thời gian bắt đầu.")
+    if duration_ms > 0:
+        end = min(end, duration_ms)
+    if end - start < MIN_MANUAL_MS:
+        raise ValueError("Khoảng quá ngắn (tối thiểu 0,1 giây).")
+    return start, end
+
+
+def combine(srt_ranges: list[Range], manual: list[Range]) -> list[Range]:
+    """Gộp hai nguồn đoạn, xếp theo thời gian (ổn định)."""
+    return sorted([*srt_ranges, *manual], key=lambda r: r.start_ms)
 
 
 def apply_order(ranges: list[Range], order: list[int]) -> list[Range]:

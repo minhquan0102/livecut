@@ -56,6 +56,14 @@ class Group:
 
 
 @dataclass
+class ManualRange:
+    """Khoảng do người dùng tự chọn trên timeline, không phụ thuộc phụ đề."""
+    id: int
+    start_ms: int
+    end_ms: int
+
+
+@dataclass
 class Project:
     name: str = "Dự án mới"
     video_path: str = ""
@@ -63,7 +71,16 @@ class Project:
     cues: list[Cue] = field(default_factory=list)
     segments: list[Segment] = field(default_factory=list)
     groups: list[Group] = field(default_factory=list)
+    manual: list[ManualRange] = field(default_factory=list)   # các khoảng tự chọn (khóa đoạn = -id)
     order: list[int] = field(default_factory=list)   # thứ tự đoạn do người dùng kéo thả (khóa = dòng SRT đầu tiên)
+
+    def add_manual(self, start_ms: int, end_ms: int) -> ManualRange:
+        m = ManualRange(max((r.id for r in self.manual), default=0) + 1, int(start_ms), int(end_ms))
+        self.manual.append(m)
+        return m
+
+    def manual_by_id(self, mid: int) -> ManualRange | None:
+        return next((m for m in self.manual if m.id == mid), None)
 
     def add_group(self, name: str) -> Group:
         g = Group(name=name.strip() or "Nhóm mới")
@@ -85,6 +102,7 @@ class Project:
             "cues": [asdict(c) for c in self.cues],
             "segments": [asdict(s) for s in self.segments],
             "groups": [asdict(g) for g in self.groups],
+            "manual": [asdict(m) for m in self.manual],
             "order": list(self.order),
         }
 
@@ -104,6 +122,7 @@ class Project:
             cues=[Cue(**c) for c in d.get("cues", [])],
             segments=[Segment(**s) for s in d.get("segments", [])],
             groups=groups,
+            manual=[ManualRange(int(m["id"]), int(m["start_ms"]), int(m["end_ms"])) for m in d.get("manual", [])],
             order=[int(k) for k in d.get("order", [])],
         )
 
